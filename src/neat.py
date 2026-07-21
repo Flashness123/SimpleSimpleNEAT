@@ -168,17 +168,11 @@ class Genome:
         self.connections[connection_gene.innovation_number] = connection_gene
         return True
 
-    def copy_genome(self) -> Genome:
-        child_nodes = {
-            node_id: node.copy_node()
-            for node_id, node in self.nodes.items()
-        }
-
-        child_connections = {
-            innovation: connection.copy_connection()
-            for innovation, connection in self.connections.items()
-        }
-        return Genome(child_nodes, child_connections, -math.inf)       
+    def copy_genome(self, preserve_fitness: bool = False) -> Genome:
+        child_nodes = {node_id: node.copy_node() for node_id, node in self.nodes.items()}
+        child_connections = {innovation: connection.copy_connection() for innovation, connection in self.connections.items()}
+        child_fitness = self.fitness if preserve_fitness else -math.inf
+        return Genome(child_nodes, child_connections, child_fitness)
         
 class NeuralNetwork:
     def __init__(self, genome: Genome) -> None:
@@ -236,10 +230,11 @@ class NeuralNetwork:
         return 0 if output_total < 0 else 1
 
 class CartPoleEvaluator:
-    def __init__(self):
-        self.environment_name = "CartPole-v1"
+    def __init__(self, seeds, environment_name="CartPole-v1"):
+        self.seeds = seeds
+        self.environment_name = environment_name
     
-    def evaluate(self, genome, seed) -> float:
+    def evaluate_episode(self, genome, seed) -> float:
         network = NeuralNetwork(genome)
         env = gym.make(self.environment_name)#, render_mode="human")
         try: #try, except, else, finally
@@ -256,6 +251,10 @@ class CartPoleEvaluator:
             return total_reward
         finally:
             env.close()
+    
+    def evaluate(self, genome):
+        return sum([self.evaluate_episode(genome, seed) for seed in self.seeds]) / len(self.seeds)
+        
 
 def mutate_weights(genome:Genome, mutation_probability:float, mutation_strength:float) -> Genome:
     for connection in genome.connections.values():
@@ -284,9 +283,9 @@ class Population:
             genomes.append(genome)
         self.genomes = genomes
         
-    def evaluate_population(self, evaluator: CartPoleEvaluator, seed=0):
+    def evaluate_population(self, evaluator: CartPoleEvaluator):
         for genome in self.genomes:
-            genome.fitness = evaluator.evaluate(genome, seed)
+            genome.fitness = evaluator.evaluate(genome)
     
     def find_best_genome(self) -> Genome:
         if not self.genomes:
@@ -294,16 +293,44 @@ class Population:
         self.best_genome = max(self.genomes, key=lambda genome: genome.fitness)
         return self.best_genome
     
-    def create_mext_generation(self, mutation_probability:float, mutation_strength:float):
+    def create_next_generation(self, mutation_probability:float, mutation_strength:float):
         if not self.genomes:
             raise ValueError("create_mext_generation, the population is empty")
-        next_generation = []
-        self.evaluate_population()
+        if any(genome.fitness == -math.inf for genome in self.genomes):
+            raise ValueError("Population must be evaluated before reproduction")
+
         best_genome = self.find_best_genome().copy_genome()
         best_genome.fitness = -math.inf
-        next_generation.append(best_genome)
+        next_generation = [best_genome]
+        
         while len(next_generation) < self.population_size:
             next_generation.append(mutate_weights(best_genome.copy_genome(), mutation_probability, mutation_strength))
+        self.genomes = next_generation
+        self.best_genome = None
+        
+    def run_generations(self, evaluator, number_of_generations, mutation_probability, mutation_strength):
+        for generation in range(number_of_generations):
+            self.evaluate_population(evaluator)
+            best_genome = self.find_best_genome()
+            avg_fitness = sum([genome.fitness for genome in self.genomes]) / self.population_size
+            print(
+                f"Generation {generation}: "
+                f"best={best_genome.fitness:.2f}, "
+                f"average={avg_fitness:.2f}")
+            
+            print("Weights of the best Genome:")
+            for connection in best_genome.connections.values():
+                print(connection.weight)
+        
+            if best_genome.fitness >= 500.0:
+                print("CartPole was solved")
+                return best_genome.copy_genome(preserve_fitness=True)
+            
+            if generation < number_of_generations - 1:
+                self.create_next_generation(mutation_probability, mutation_strength)
+        
+        return self.find_best_genome().copy_genome(preserve_fitness=True)
+        
         
     
 def main() -> None:
@@ -322,22 +349,22 @@ def main() -> None:
         connection = ConnectionGene(source_id=source_id, destination_id=4, weight=weight, enabled=True, innovation_number=source_id)
         if not genome.add_connection(connection):
             raise RuntimeError(f"Failed to add connection from node {source_id}")
-    evaluator = CartPoleEvaluator()
-    genome.fitness = evaluator.evaluate(genome=genome, seed=42)
-    print(f"Genome fitness: {genome.fitness}")
     
+    evaluator = CartPoleEvaluator(seeds=[0, 1, 2])
+
     population = Population(population_size=10)
     population.initialize_population()
-    population.evaluate_population(evaluator=evaluator, seed=0)
-    best_genome = population.find_best_genome()
-    
-    for genome in population.genomes:
-        print(f"Genome fitness: {genome.fitness}")
-        
-    print("Weights of the best Genome:")     
-    for connection in best_genome.connections.values():
-        print(connection.weight)
 
+    winner = population.run_generations(
+        evaluator=evaluator,
+        number_of_generations=200,
+        mutation_probability=0.2,
+        mutation_strength=0.2,
+    )
+
+    print(f"Winning fitness: {winner.fitness}")
+    
+    
     
 if __name__ == "__main__":
     main()
