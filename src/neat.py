@@ -1,3 +1,4 @@
+# TODO: Instead of a node_value dict wouldnt it be better to give a new attrivute to nodes?
 from __future__ import annotations
 
 import math
@@ -180,16 +181,9 @@ class NeuralNetwork:
             raise TypeError("NeuralNetwork requires a Genome")
 
         self.genome: Genome = genome
-        self.input_nodes: list[NodeGene] = sorted(
-            (node for node in genome.nodes.values() if node.is_input()),
-            key=lambda node: node.node_id,
-        )
-        self.output_nodes: list[NodeGene] = [
-            node for node in genome.nodes.values() if node.is_output()
-        ]
-        self.hidden_nodes: list[NodeGene] = [
-            node for node in genome.nodes.values() if node.is_hidden()
-        ]
+        self.input_nodes: list[NodeGene] = sorted((node for node in genome.nodes.values() if node.is_input()), key=lambda node: node.node_id)
+        self.output_nodes: list[NodeGene] = [node for node in genome.nodes.values() if node.is_output()]
+        self.hidden_nodes: list[NodeGene] = [node for node in genome.nodes.values() if node.is_hidden()]
 
         if len(self.input_nodes) != 4:
             raise ValueError("NeuralNetwork requires exactly 4 input nodes")
@@ -197,43 +191,116 @@ class NeuralNetwork:
         if len(self.output_nodes) != 1:
             raise ValueError("NeuralNetwork requires exactly 1 output node")
 
-        if self.hidden_nodes:
-            raise NotImplementedError("This network version cannot evaluate hidden nodes yet")
-
         self.output_node: NodeGene = self.output_nodes[0]
+        self.incoming_connections: dict[int, list[ConnectionGene]] = {node.node_id: [] for node in self.hidden_nodes + self.output_nodes}
 
-    def activate(self, observation: Sequence[Real]) -> int:
-        if len(observation) != 4:
-            raise ValueError("Observation must contain exactly 4 values")
-
-        node_values: dict[int, float] = {
-            node.node_id: float(value)
-            for node, value in zip(self.input_nodes, observation, strict=True)
-        }
-
-        output_total = self.output_node.node_bias
-
-        for connection in self.genome.connections.values():
+        for connection in genome.connections.values():
             if not connection.is_enabled():
                 continue
 
-            if connection.destination_id != self.output_node.node_id:
-                continue
-
-            if connection.source_id not in node_values:
+            if connection.source_id not in genome.nodes:
                 raise ValueError(
-                    f"Source node {connection.source_id} has no calculated value"
+                    f"Connection references missing source node "
+                    f"{connection.source_id}"
                 )
 
-            output_total += node_values[connection.source_id] * connection.weight
+            if connection.destination_id not in genome.nodes:
+                raise ValueError(
+                    f"Connection references missing destination node "
+                    f"{connection.destination_id}"
+                )
 
-        return 0 if output_total < 0 else 1
+            if connection.destination_id not in self.incoming_connections:
+                raise ValueError(
+                    f"Enabled connection cannot target node "
+                    f"{connection.destination_id}"
+                )
+
+            self.incoming_connections[
+                connection.destination_id
+            ].append(connection)
+
+        self.evaluation_order: list[NodeGene] = (
+            self.build_evaluation_order()
+        )
+
+    def activate(self, observation: Sequence[Real]) -> int:
+        if len(observation) != len(self.input_nodes):
+            raise ValueError(
+                f"Observation must contain exactly "
+                f"{len(self.input_nodes)} values"
+            )
+
+        node_values: dict[int, float] = {
+            node.node_id: float(value)
+            for node, value in zip(
+                self.input_nodes,
+                observation,
+                strict=True,
+            )
+        }
+
+        for node in self.evaluation_order:
+            total = node.node_bias
+
+            for connection in self.incoming_connections[node.node_id]:
+                if connection.source_id not in node_values:
+                    raise RuntimeError(
+                        f"Source node {connection.source_id} "
+                        "has not been evaluated"
+                    )
+
+                total += (
+                    node_values[connection.source_id]
+                    * connection.weight
+                )
+
+            if node.is_hidden():
+                node_values[node.node_id] = math.tanh(total)
+            else:
+                node_values[node.node_id] = total
+
+        output_value = node_values[self.output_node.node_id]
+        return 0 if output_value < 0.0 else 1
+
     
-    def build_evaluation_order(self):
-        calculated_node_ids = self.input_nodes
-        not_calculated_node_ids = self.hidden_nodes + self.output_node
-        
-        raise NotImplementedError()
+    def build_evaluation_order(self) -> list[NodeGene]:
+        calculated_node_ids: set[int] = {
+            node.node_id for node in self.input_nodes
+        }
+
+        remaining_nodes: dict[int, NodeGene] = {
+            node.node_id: node
+            for node in self.hidden_nodes + self.output_nodes
+        }
+
+        evaluation_order: list[NodeGene] = []
+
+        while remaining_nodes:
+            ready_node_ids: list[int] = [
+                node_id
+                for node_id in remaining_nodes
+                if all(
+                    connection.source_id in calculated_node_ids
+                    for connection
+                    in self.incoming_connections[node_id]
+                )
+            ]
+
+            if not ready_node_ids:
+                unresolved_node_ids = sorted(remaining_nodes)
+
+                raise ValueError(
+                    "Network graph contains a cycle or unresolved "
+                    f"dependency among nodes {unresolved_node_ids}"
+                )
+
+            for node_id in sorted(ready_node_ids):
+                node = remaining_nodes.pop(node_id)
+                evaluation_order.append(node)
+                calculated_node_ids.add(node_id)
+
+        return evaluation_order
 
 class CartPoleEvaluator:
     #def __init__(self, seeds, environment_name="InvertedDoublePendulum-v5"):
@@ -347,8 +414,11 @@ def main() -> None:
     for node_id in range(4):
         if not genome.add_node(NodeGene(node_id, "input", 0.0)):
             raise RuntimeError(f"Failed to add input node {node_id}")
+    # add one hidden node
+    if not genome.add_node(NodeGene(4, "hidden", 0.0)):
+        raise RuntimeError("Failed to add output node")
     # add one output node
-    if not genome.add_node(NodeGene(4, "output", 0.0)):
+    if not genome.add_node(NodeGene(5, "output", 0.0)):
         raise RuntimeError("Failed to add output node")
     # add four input-to-output connections
     weights: list[float] = [3.0, -2.0, 2.0, 1.0]
@@ -356,20 +426,24 @@ def main() -> None:
         connection = ConnectionGene(source_id=source_id, destination_id=4, weight=weight, enabled=True, innovation_number=source_id)
         if not genome.add_connection(connection):
             raise RuntimeError(f"Failed to add connection from node {source_id}")
+    genome.add_connection(ConnectionGene(source_id=4, destination_id=5, weight=1.0, enabled=True, innovation_number=4))
     
     evaluator = CartPoleEvaluator(seeds=[0, 1, 2])
 
-    population = Population(population_size=10)
-    population.initialize_population()
+    print(f"Eval: {evaluator.evaluate(genome)}")
 
-    winner = population.run_generations(
-        evaluator=evaluator,
-        number_of_generations=200,
-        mutation_probability=0.2,
-        mutation_strength=0.2,
-    )
 
-    print(f"Winning fitness: {winner.fitness}")
+    # population = Population(population_size=10)
+    # population.initialize_population()
+
+    # winner = population.run_generations(
+    #     evaluator=evaluator,
+    #     number_of_generations=200,
+    #     mutation_probability=0.2,
+    #     mutation_strength=0.2,
+    # )
+
+    # print(f"Winning fitness: {winner.fitness}")
     
     
     
