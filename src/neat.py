@@ -168,6 +168,12 @@ class Genome:
 
         self.connections[connection_gene.innovation_number] = connection_gene
         return True
+    
+    def find_connection(self, source_id, destination_id):
+        for connection in self.connections.values():
+            if connection.source_id == source_id and connection.destination_id == destination_id:
+                return connection
+        return None
 
     def copy_genome(self, preserve_fitness: bool = False) -> Genome:
         child_nodes = {node_id: node.copy_node() for node_id, node in self.nodes.items()}
@@ -329,7 +335,6 @@ class CartPoleEvaluator:
     def evaluate(self, genome):
         return sum([self.evaluate_episode(genome, seed) for seed in self.seeds]) / len(self.seeds)
         
-
 def mutate_weights(genome:Genome, mutation_probability:float, mutation_strength:float) -> Genome:
     for connection in genome.connections.values():
         rnd = random.random()
@@ -338,11 +343,202 @@ def mutate_weights(genome:Genome, mutation_probability:float, mutation_strength:
     genome.fitness = -math.inf
     return genome
 
+def mutate_add_node(genome: Genome, innovation_tracker: InnovationTracker):
+    enabled_connections = []
+    for connection in genome.connections.values():
+        if connection.is_enabled():
+            enabled_connections.append(connection)
+    if not enabled_connections:
+        return False
+    selected_connection = random.choice(enabled_connections)
+    connection_split_record = innovation_tracker.get_or_create_connection_split(selected_connection)
+    inserted_node_id = connection_split_record["inserted_node_id"]
+    if inserted_node_id not in genome.nodes:
+        genome.add_node(NodeGene(inserted_node_id, "hidden", 0))
+    
+    first_connection = genome.find_connection(selected_connection.source_id, inserted_node_id)
+
+    if first_connection is None:
+        first_connection = ConnectionGene(source_id=selected_connection.source_id, destination_id=inserted_node_id, weight=1.0, enabled=True, innovation_number=connection_split_record["source_to_inserted_node_innovation"])
+
+        if not genome.add_connection(first_connection):
+            raise RuntimeError("Failed to add source-to-inserted-node connection")
+    else:
+        first_connection.enable()
+
+    second_connection = genome.find_connection(inserted_node_id, selected_connection.destination_id)
+
+    if second_connection is None:
+        second_connection = ConnectionGene(source_id=inserted_node_id, destination_id=selected_connection.destination_id, weight=selected_connection.weight, enabled=True, innovation_number=connection_split_record["inserted_node_to_destination_innovation"])
+
+        if not genome.add_connection(second_connection):
+            raise RuntimeError("Failed to add inserted-node-to-destination connection")
+    else:
+        second_connection.enable()
+
+    selected_connection.disable()
+    genome.fitness = -math.inf
+    return True
+
+def crossover(parent_a: Genome, parent_b: Genome, disabled_inheritance_probability = 0.75):
+    if parent_a.fitness > parent_b.fitness:
+        fitter_parent = parent_a
+        weaker_parent = parent_b
+    elif parent_b.fitness > parent_a.fitness:
+        fitter_parent = parent_b
+        weaker_parent = parent_a
+    else:
+        fitter_parent, weaker_parent = random.choice(((parent_a, parent_b), (parent_b, parent_a)))
+
+    child = Genome()
+    for node_id, fitter_node in fitter_parent.nodes.items():
+        weaker_node = weaker_parent.nodes.get(node_id)
+
+        if weaker_node is None:
+            inherited_node = fitter_node
+        else:
+            inherited_node = random.choice((fitter_node, weaker_node))
+
+        if not child.add_node(inherited_node.copy_node()):
+            raise RuntimeError(f"Failed to add node {node_id} during crossover")
+
+    for innovation, fitter_connection in (fitter_parent.connections.items()):
+        weaker_connection = weaker_parent.connections.get(innovation)
+
+        if weaker_connection is None:
+            inherited_connection = (fitter_connection.copy_connection())
+        else:
+            if not weaker_connection.connects(fitter_connection.source_id, fitter_connection.destination_id):
+                raise RuntimeError(
+                    f"Innovation {innovation} refers to different "
+                    "connections in the two parents"
+                )
+
+            inherited_connection = random.choice(
+                (fitter_connection, weaker_connection)
+            ).copy_connection()
+
+            if (not fitter_connection.is_enabled() or not weaker_connection.is_enabled()):
+                if (random.random() < disabled_inheritance_probability):
+                    inherited_connection.disable()
+                else:
+                    inherited_connection.enable()
+
+        if not child.add_connection(inherited_connection):
+            raise RuntimeError(
+                f"Failed to add innovation {innovation} "
+                "during crossover"
+            )
+
+    child.fitness = -math.inf
+    return child
+        
+        
+
+
+class InnovationTracker:
+    def __init__(self, initial_genome: Genome):
+        self.connection_history: dict[tuple[int, int], int] = {}
+        self.innovation_history: dict[int, tuple[int, int]] = {}
+        self.split_history = {}
+        
+        self.next_node_id = ( max(initial_genome.nodes) + 1 if initial_genome.nodes else 0 )
+        self.next_innovation_number = ( max(connection.innovation_number for connection in initial_genome.connections.values()) + 1 if initial_genome.connections else 0 )
+        
+        for connection in initial_genome.connections.values():
+            self.register_connection(connection)
+        
+    def register_connection(self, connection: ConnectionGene) -> None:
+        if not isinstance(connection, ConnectionGene):
+            raise TypeError("register_connection requires a ConnectionGene")
+
+        if not connection.validate():
+            raise ValueError("Cannot register an invalid ConnectionGene")
+
+        connection_key = (connection.source_id, connection.destination_id)
+        innovation_number = connection.innovation_number
+
+        existing_innovation = self.connection_history.get(connection_key)
+
+        if (existing_innovation is not None and existing_innovation != innovation_number):
+            raise ValueError(
+                f"Connection {connection_key} is already registered "
+                f"with innovation {existing_innovation}, not "
+                f"{innovation_number}"
+            )
+
+        existing_connection = self.innovation_history.get(innovation_number)
+
+        if (existing_connection is not None and existing_connection != connection_key):
+            raise ValueError(
+                f"Innovation {innovation_number} is already registered "
+                f"for connection {existing_connection}, not "
+                f"{connection_key}"
+            )
+
+        self.connection_history[connection_key] = innovation_number
+        self.innovation_history[innovation_number] = connection_key
+
+        if innovation_number >= self.next_innovation_number:
+            self.next_innovation_number = innovation_number + 1
+    def _get_next_node_id(self):
+        next_node_id = self.next_node_id
+        self.next_node_id += 1
+        return next_node_id
+    def _get_next_innovation_number(self):
+        next_innovation_number = self.next_innovation_number
+        self.next_innovation_number += 1
+        return next_innovation_number
+    
+    def get_connection_innovation(self, source_id, destination_id):
+        existing_innovation = self.connection_history.get((source_id, destination_id))
+        if existing_innovation is not None:
+            registered_connection = self.innovation_history.get(existing_innovation)
+            if registered_connection != (source_id, destination_id):
+                raise RuntimeError("Innovation history is internally inconsistent")
+            return existing_innovation 
+        innovation_number = self._get_next_innovation_number()
+        self.connection_history[(source_id, destination_id)] = innovation_number
+        self.innovation_history[innovation_number] = (source_id, destination_id)
+        return innovation_number
+    
+    def get_or_create_connection_split(self, connection: ConnectionGene):
+        original_innovation = connection.innovation_number
+        original_connection = (connection.source_id, connection.destination_id)
+        registered_connection = self.innovation_history.get(original_innovation)
+        if registered_connection != original_connection:
+            raise ValueError(
+                f"Innovation {original_innovation} is not registered "
+                f"for connection {original_connection}"
+            )
+        existing_split = self.split_history.get(original_innovation)
+        if existing_split:
+            return existing_split.copy()
+        
+        inserted_node_id = self._get_next_node_id()
+        source_to_inserted_node_innovation = (self.get_connection_innovation(connection.source_id, inserted_node_id))
+        inserted_node_to_destination_innovation = (self.get_connection_innovation(inserted_node_id, connection.destination_id))
+
+        connection_split_record = {
+            "original_source_id": connection.source_id,
+            "original_destination_id": (connection.destination_id),
+            "inserted_node_id": inserted_node_id,
+            "source_to_inserted_node_innovation": (source_to_inserted_node_innovation),
+            "inserted_node_to_destination_innovation": (inserted_node_to_destination_innovation),
+        }
+
+        self.split_history[original_innovation] = connection_split_record
+        return connection_split_record.copy()
+    
+
+        
+
 class Population:
-    def __init__(self, genomes: list[Genome] = None, population_size: int = 10, best_genome: Genome = None):
+    def __init__(self, genomes: list[Genome] = None, population_size: int = 10, best_genome: Genome = None, innovation_tracker: InnovationTracker = None):
         self.genomes = genomes
         self.population_size = population_size
         self.best_genome = best_genome
+        self.innovation_tracker = innovation_tracker
 
     def initialize_population(self):
         genomes = []
@@ -406,46 +602,140 @@ class Population:
         return self.find_best_genome().copy_genome(preserve_fitness=True)
         
         
-    
-def main() -> None:
-    # create genome
+def create_initial_genome() -> Genome:
     genome = Genome()
-    # add four input nodes
+
     for node_id in range(4):
-        if not genome.add_node(NodeGene(node_id, "input", 0.0)):
-            raise RuntimeError(f"Failed to add input node {node_id}")
-    # add one hidden node
-    if not genome.add_node(NodeGene(4, "hidden", 0.0)):
+        if not genome.add_node(
+            NodeGene(
+                node_id=node_id,
+                node_type="input",
+                node_bias=0.0,
+            )
+        ):
+            raise RuntimeError(
+                f"Failed to add input node {node_id}"
+            )
+
+    output_node_id = 4
+
+    if not genome.add_node(
+        NodeGene(
+            node_id=output_node_id,
+            node_type="output",
+            node_bias=0.0,
+        )
+    ):
         raise RuntimeError("Failed to add output node")
-    # add one output node
-    if not genome.add_node(NodeGene(5, "output", 0.0)):
-        raise RuntimeError("Failed to add output node")
-    # add four input-to-output connections
-    weights: list[float] = [3.0, -2.0, 2.0, 1.0]
-    for source_id, weight in enumerate(weights):
-        connection = ConnectionGene(source_id=source_id, destination_id=4, weight=weight, enabled=True, innovation_number=source_id)
+
+    initial_weights = [0.1, 0.2, 0.3, 0.4]
+
+    for source_id, weight in enumerate(initial_weights):
+        connection = ConnectionGene(
+            source_id=source_id,
+            destination_id=output_node_id,
+            weight=weight,
+            enabled=True,
+            innovation_number=source_id,
+        )
+
         if not genome.add_connection(connection):
-            raise RuntimeError(f"Failed to add connection from node {source_id}")
-    genome.add_connection(ConnectionGene(source_id=4, destination_id=5, weight=1.0, enabled=True, innovation_number=4))
-    
+            raise RuntimeError(
+                f"Failed to add connection "
+                f"{source_id} → {output_node_id}"
+            )
+
+    return genome
+
+
+def print_genome(name: str, genome: Genome) -> None:
+    print(f"\n{name}")
+    print(f"Fitness: {genome.fitness}")
+    print(f"Nodes: {sorted(genome.nodes)}")
+    print("Connections:")
+
+    for innovation in sorted(genome.connections):
+        connection = genome.connections[innovation]
+
+        print(
+            f"  innovation={innovation}: "
+            f"{connection.source_id} → "
+            f"{connection.destination_id}, "
+            f"weight={connection.weight:.2f}, "
+            f"enabled={connection.enabled}"
+        )
+
+
+def main() -> None:
+    random.seed(10)
+
+    initial_genome = create_initial_genome()
+    tracker = InnovationTracker(initial_genome)
+
+    parent_a = initial_genome.copy_genome()
+    parent_b = initial_genome.copy_genome()
+    for connection in parent_a.connections.values():
+        connection.weight += 10.0
+
+    for connection in parent_b.connections.values():
+        connection.weight -= 10.0
+
+    if not mutate_add_node(parent_a, tracker):
+        raise RuntimeError("Add-node mutation failed")
+
+    parent_a.fitness = 200.0
+    parent_b.fitness = 100.0
+
+    print_genome("Parent A — fitter", parent_a)
+    print_genome("Parent B — weaker", parent_b)
+
+    child = crossover(
+        parent_a=parent_a,
+        parent_b=parent_b,
+        disabled_inheritance_probability=0.75,
+    )
+
+    print_genome("Child", child)
+    assert set(child.connections) == set(parent_a.connections)
+    assert set(child.nodes) == set(parent_a.nodes)
+    for innovation, child_connection in child.connections.items():
+        assert (
+            child_connection
+            is not parent_a.connections[innovation]
+        )
+
+        if innovation in parent_b.connections:
+            assert (
+                child_connection
+                is not parent_b.connections[innovation]
+            )
+
+    assert child.fitness == -math.inf
+
+    network = NeuralNetwork(child)
+
+    print(
+        "\nChild evaluation order:",
+        [
+            node.node_id
+            for node in network.evaluation_order
+        ],
+    )
+
+    observation = [0.1, -0.2, 0.03, 0.4]
+    action = network.activate(observation)
+
+    print("Test observation:", observation)
+    print("Chosen action:", action)
+
+    assert action in (0, 1)
+
     evaluator = CartPoleEvaluator(seeds=[0, 1, 2])
+    child_fitness = evaluator.evaluate(child)
 
-    print(f"Eval: {evaluator.evaluate(genome)}")
+    print("Child CartPole fitness:", child_fitness)
+    print("\nCrossover test passed.")
 
 
-    # population = Population(population_size=10)
-    # population.initialize_population()
-
-    # winner = population.run_generations(
-    #     evaluator=evaluator,
-    #     number_of_generations=200,
-    #     mutation_probability=0.2,
-    #     mutation_strength=0.2,
-    # )
-
-    # print(f"Winning fitness: {winner.fitness}")
-    
-    
-    
 if __name__ == "__main__":
     main()
