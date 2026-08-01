@@ -228,8 +228,15 @@ class NeuralNetwork:
             output_total += node_values[connection.source_id] * connection.weight
 
         return 0 if output_total < 0 else 1
+    
+    def build_evaluation_order(self):
+        calculated_node_ids = self.input_nodes
+        not_calculated_node_ids = self.hidden_nodes + self.output_node
+        
+        raise NotImplementedError()
 
 class CartPoleEvaluator:
+    #def __init__(self, seeds, environment_name="InvertedDoublePendulum-v5"):
     def __init__(self, seeds, environment_name="CartPole-v1"):
         self.seeds = seeds
         self.environment_name = environment_name
