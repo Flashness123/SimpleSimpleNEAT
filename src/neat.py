@@ -1,14 +1,12 @@
 # TODO: Instead of a node_value dict wouldnt it be better to give a new attrivute to nodes?
 from __future__ import annotations
-
 import math
 from collections.abc import Sequence
 from numbers import Real
-import os
 import random
 from typing import ClassVar, Literal, TypeAlias
-
-import gymnasium as gym
+from omegaconf import OmegaConf
+from gym_environment_wrapper import GymEnvironmentWrapper
 
 
 NodeType: TypeAlias = Literal["input", "hidden", "output"]
@@ -188,16 +186,9 @@ class NeuralNetwork:
 
         self.genome: Genome = genome
         self.input_nodes: list[NodeGene] = sorted((node for node in genome.nodes.values() if node.is_input()), key=lambda node: node.node_id)
-        self.output_nodes: list[NodeGene] = [node for node in genome.nodes.values() if node.is_output()]
+        self.output_nodes: list[NodeGene] = sorted((node for node in genome.nodes.values() if node.is_output()), key=lambda node: node.node_id)
         self.hidden_nodes: list[NodeGene] = [node for node in genome.nodes.values() if node.is_hidden()]
 
-        if len(self.input_nodes) != 4:
-            raise ValueError("NeuralNetwork requires exactly 4 input nodes")
-
-        if len(self.output_nodes) != 1:
-            raise ValueError("NeuralNetwork requires exactly 1 output node")
-
-        self.output_node: NodeGene = self.output_nodes[0]
         self.incoming_connections: dict[int, list[ConnectionGene]] = {node.node_id: [] for node in self.hidden_nodes + self.output_nodes}
 
         for connection in genome.connections.values():
@@ -230,7 +221,7 @@ class NeuralNetwork:
             self.build_evaluation_order()
         )
 
-    def activate(self, observation: Sequence[Real]) -> int:
+    def activate(self, observation: Sequence[Real]) -> list[float]:
         if len(observation) != len(self.input_nodes):
             raise ValueError(
                 f"Observation must contain exactly "
@@ -256,18 +247,13 @@ class NeuralNetwork:
                         "has not been evaluated"
                     )
 
-                total += (
-                    node_values[connection.source_id]
-                    * connection.weight
-                )
+                total += (node_values[connection.source_id] * connection.weight)
 
             if node.is_hidden():
                 node_values[node.node_id] = math.tanh(total)
             else:
                 node_values[node.node_id] = total
-
-        output_value = node_values[self.output_node.node_id]
-        return 0 if output_value < 0.0 else 1
+        return [node_values[output_node.node_id] for output_node in self.output_nodes]
 
     
     def build_evaluation_order(self) -> list[NodeGene]:
@@ -308,22 +294,22 @@ class NeuralNetwork:
 
         return evaluation_order
 
-class CartPoleEvaluator:
-    #def __init__(self, seeds, environment_name="InvertedDoublePendulum-v5"):
-    def __init__(self, seeds, environment_name="CartPole-v1"):
-        self.seeds = seeds
-        self.environment_name = environment_name
+class EnvironmentEvaluator:
+    def __init__(self, config, wrapper):
+        self.seeds = config.environment.seeds
+        self.wrapper = wrapper
     
     def evaluate_episode(self, genome, seed) -> float:
         network = NeuralNetwork(genome)
-        env = gym.make(self.environment_name)#, render_mode="human")
+        env = self.wrapper.create_environment()
         try: #try, except, else, finally
             observation, _ = env.reset(seed=seed)
             total_reward = 0
             while True:
                 # env.render()
-                action = network.activate(observation)
-                # print(f"Chosen action to execute: {action}")
+                inputs = self.wrapper.observation_to_inputs(observation)
+                outputs = network.activate(inputs)
+                action = self.wrapper.outputs_to_action(outputs)
                 observation, reward, terminated, truncated, info = env.step(action)
                 total_reward += reward
                 if terminated or truncated:
@@ -340,8 +326,16 @@ def mutate_weights(genome:Genome, mutation_probability:float, mutation_strength:
         rnd = random.random()
         if rnd < mutation_probability:
             connection.weight += random.gauss(0, mutation_strength)
+            #print(f"Mutated by {mutation_strength}")
     genome.fitness = -math.inf
     return genome
+
+def mutate_add_connection(genome: Genome, innovation_tracker: InnovationTracker):
+    possible_connections = []
+    for source_node in genome.nodes:
+        if source_node.is_output():
+            continue
+        
 
 def mutate_add_node(genome: Genome, innovation_tracker: InnovationTracker):
     enabled_connections = []
@@ -534,26 +528,37 @@ class InnovationTracker:
         
 
 class Population:
-    def __init__(self, genomes: list[Genome] = None, population_size: int = 10, best_genome: Genome = None, innovation_tracker: InnovationTracker = None):
+    def __init__(self, config, genomes: list[Genome] = None, population_size: int = None, best_genome: Genome = None):
+        self.config = config
         self.genomes = genomes
-        self.population_size = population_size
+        self.population_size = self.config.environment.population_size if population_size is None else population_size
         self.best_genome = best_genome
-        self.innovation_tracker = innovation_tracker
+        self.innovation_tracker = None
 
-    def initialize_population(self):
+    def initialize_population(self, input_count, output_count):
         genomes = []
         for _ in range(self.population_size):
             genome = Genome()
-            for node_id in range(4):
+
+            for node_id in range(input_count):
                 genome.add_node(NodeGene(node_id, "input", 0.0))
-            genome.add_node(NodeGene(4, "output", 0.0))
-            for source_id in range(4):
-                connection = ConnectionGene(source_id=source_id, destination_id=4, weight=random.uniform(-1, 1), enabled=True, innovation_number=source_id)
-                genome.add_connection(connection)
+                
+            for node_id in range(input_count, input_count + output_count):
+                genome.add_node(NodeGene(node_id, "output", 0.0))
+                
+            innovation_number = 0
+            
+            for source_id in range(input_count):
+                for destination_id in range(input_count, input_count + output_count):
+                    connection = ConnectionGene(source_id=source_id, destination_id=destination_id, weight=random.uniform(-1, 1), enabled=True, innovation_number=innovation_number)
+                    genome.add_connection(connection)
+                    innovation_number += 1
             genomes.append(genome)
         self.genomes = genomes
+        self.innovation_tracker = InnovationTracker(self.genomes[0])
         
-    def evaluate_population(self, evaluator: CartPoleEvaluator):
+        
+    def evaluate_population(self, evaluator: EnvironmentEvaluator):
         for genome in self.genomes:
             genome.fitness = evaluator.evaluate(genome)
     
@@ -563,7 +568,12 @@ class Population:
         self.best_genome = max(self.genomes, key=lambda genome: genome.fitness)
         return self.best_genome
     
-    def create_next_generation(self, mutation_probability:float, mutation_strength:float):
+    def _select_parent(self, tournament_size, excluded_parent = None):
+        candidates = [genome for genome in self.genomes if genome is not excluded_parent]
+        selected_candidates = random.sample(candidates, k = min(tournament_size, len(candidates)))
+        return max(selected_candidates, key=lambda genome: genome.fitness)
+        
+    def create_next_generation(self, weight_mutation_probability:float, weight_mutation_strength:float, crossover_probability, add_node_probability, tournament_size = 3):
         if not self.genomes:
             raise ValueError("create_mext_generation, the population is empty")
         if any(genome.fitness == -math.inf for genome in self.genomes):
@@ -574,11 +584,26 @@ class Population:
         next_generation = [best_genome]
         
         while len(next_generation) < self.population_size:
-            next_generation.append(mutate_weights(best_genome.copy_genome(), mutation_probability, mutation_strength))
+            parent_a = self._select_parent(tournament_size=tournament_size)
+            should_crossover = (random.random() < crossover_probability)
+
+            if should_crossover:
+                parent_b = self._select_parent(tournament_size=tournament_size, excluded_parent=parent_a)
+                child = crossover(parent_a, parent_b)
+            else:
+                child = parent_a.copy_genome()
+            
+
+            mutate_weights(genome=child, mutation_probability=(weight_mutation_probability), mutation_strength=weight_mutation_strength)
+
+            if random.random() < add_node_probability: 
+                mutate_add_node(genome=child, innovation_tracker=self.innovation_tracker)
+            next_generation.append(child)
+
         self.genomes = next_generation
         self.best_genome = None
         
-    def run_generations(self, evaluator, number_of_generations, mutation_probability, mutation_strength):
+    def run_generations(self, evaluator, number_of_generations, weight_mutation_probability, weight_mutation_strength, crossover_probability, add_node_probability, tournament_size = 3):
         for generation in range(number_of_generations):
             self.evaluate_population(evaluator)
             best_genome = self.find_best_genome()
@@ -592,149 +617,53 @@ class Population:
             for connection in best_genome.connections.values():
                 print(connection.weight)
         
-            if best_genome.fitness >= 500.0:
-                print("CartPole was solved")
+            if best_genome.fitness >= self.config.environment.target_fitness:
+                print("Environment was solved")
                 return best_genome.copy_genome(preserve_fitness=True)
             
             if generation < number_of_generations - 1:
-                self.create_next_generation(mutation_probability, mutation_strength)
+                self.create_next_generation(weight_mutation_probability, weight_mutation_strength, crossover_probability, add_node_probability, tournament_size)
         
         return self.find_best_genome().copy_genome(preserve_fitness=True)
-        
-        
-def create_initial_genome() -> Genome:
-    genome = Genome()
-
-    for node_id in range(4):
-        if not genome.add_node(
-            NodeGene(
-                node_id=node_id,
-                node_type="input",
-                node_bias=0.0,
-            )
-        ):
-            raise RuntimeError(
-                f"Failed to add input node {node_id}"
-            )
-
-    output_node_id = 4
-
-    if not genome.add_node(
-        NodeGene(
-            node_id=output_node_id,
-            node_type="output",
-            node_bias=0.0,
-        )
-    ):
-        raise RuntimeError("Failed to add output node")
-
-    initial_weights = [0.1, 0.2, 0.3, 0.4]
-
-    for source_id, weight in enumerate(initial_weights):
-        connection = ConnectionGene(
-            source_id=source_id,
-            destination_id=output_node_id,
-            weight=weight,
-            enabled=True,
-            innovation_number=source_id,
-        )
-
-        if not genome.add_connection(connection):
-            raise RuntimeError(
-                f"Failed to add connection "
-                f"{source_id} → {output_node_id}"
-            )
-
-    return genome
-
-
-def print_genome(name: str, genome: Genome) -> None:
-    print(f"\n{name}")
-    print(f"Fitness: {genome.fitness}")
-    print(f"Nodes: {sorted(genome.nodes)}")
-    print("Connections:")
-
-    for innovation in sorted(genome.connections):
-        connection = genome.connections[innovation]
-
-        print(
-            f"  innovation={innovation}: "
-            f"{connection.source_id} → "
-            f"{connection.destination_id}, "
-            f"weight={connection.weight:.2f}, "
-            f"enabled={connection.enabled}"
-        )
-
 
 def main() -> None:
-    random.seed(10)
+    config = OmegaConf.load("src/config.yaml")
+    random.seed(config.environment.random_seed)
+    gym_wrapper = GymEnvironmentWrapper(environment_name=config.environment.name)
+    evaluator = EnvironmentEvaluator(config, gym_wrapper)
 
-    initial_genome = create_initial_genome()
-    tracker = InnovationTracker(initial_genome)
+    population = Population(config)
+    population.initialize_population(input_count=gym_wrapper.input_count, output_count=gym_wrapper.output_count)
 
-    parent_a = initial_genome.copy_genome()
-    parent_b = initial_genome.copy_genome()
-    for connection in parent_a.connections.values():
-        connection.weight += 10.0
-
-    for connection in parent_b.connections.values():
-        connection.weight -= 10.0
-
-    if not mutate_add_node(parent_a, tracker):
-        raise RuntimeError("Add-node mutation failed")
-
-    parent_a.fitness = 200.0
-    parent_b.fitness = 100.0
-
-    print_genome("Parent A — fitter", parent_a)
-    print_genome("Parent B — weaker", parent_b)
-
-    child = crossover(
-        parent_a=parent_a,
-        parent_b=parent_b,
-        disabled_inheritance_probability=0.75,
+    winner = population.run_generations(
+        evaluator=evaluator,
+        number_of_generations=200,
+        weight_mutation_probability=0.2,
+        weight_mutation_strength=0.2,
+        crossover_probability=0.75,
+        add_node_probability=0.03,
+        tournament_size=3,
     )
 
-    print_genome("Child", child)
-    assert set(child.connections) == set(parent_a.connections)
-    assert set(child.nodes) == set(parent_a.nodes)
-    for innovation, child_connection in child.connections.items():
-        assert (
-            child_connection
-            is not parent_a.connections[innovation]
-        )
+    # print("\nWinning fitness:", winner.fitness)
+    # print("Winning nodes:", len(winner.nodes))
+    # print(
+    #     "Winning connections:",
+    #     len(winner.connections),
+    # )
 
-        if innovation in parent_b.connections:
-            assert (
-                child_connection
-                is not parent_b.connections[innovation]
-            )
+    # print("\nWinning connection genes:")
 
-    assert child.fitness == -math.inf
+    # for innovation in sorted(winner.connections):
+    #     connection = winner.connections[innovation]
 
-    network = NeuralNetwork(child)
-
-    print(
-        "\nChild evaluation order:",
-        [
-            node.node_id
-            for node in network.evaluation_order
-        ],
-    )
-
-    observation = [0.1, -0.2, 0.03, 0.4]
-    action = network.activate(observation)
-
-    print("Test observation:", observation)
-    print("Chosen action:", action)
-
-    assert action in (0, 1)
-
-    evaluator = CartPoleEvaluator(seeds=[0, 1, 2])
-    child_fitness = evaluator.evaluate(child)
-
-    print("Child CartPole fitness:", child_fitness)
-    print("\nCrossover test passed.")
+    #     print(
+    #         f"Innovation {innovation}: "
+    #         f"{connection.source_id} → "
+    #         f"{connection.destination_id}, "
+    #         f"weight={connection.weight:.4f}, "
+    #         f"enabled={connection.enabled}"
+    #     )
 
 
 if __name__ == "__main__":
