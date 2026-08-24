@@ -4,3 +4,11 @@ environment:
     population_size: 50
     target_fitness: 500.0
     random_seed: 10
+
+training:
+    number_of_generations: 200
+    crossover_probability: 0.8
+    add_node_probability: 0.1
+    add_connection_probability: 0.1
+    weight_mutation_probability: 0.4
+    weight_mutation_strength: 0.2

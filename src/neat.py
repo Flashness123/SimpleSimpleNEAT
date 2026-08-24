@@ -330,12 +330,56 @@ def mutate_weights(genome:Genome, mutation_probability:float, mutation_strength:
     genome.fitness = -math.inf
     return genome
 
+def creates_cycle_check(genome: Genome, source_id, destination_id):
+    queue = [destination_id]
+    visited = set()
+    
+    while queue:
+        current = queue.pop(0)
+        if current == source_id:
+            return True
+        if current in visited:
+            continue
+        visited.add(current)
+        for connection in genome.connections.values():
+            if not connection.is_enabled():
+                continue
+            if connection.source_id == current:
+                queue.append(connection.destination_id)
+    return False
+    
 def mutate_add_connection(genome: Genome, innovation_tracker: InnovationTracker):
     possible_connections = []
-    for source_node in genome.nodes:
+    for source_node in genome.nodes.values():
         if source_node.is_output():
             continue
-        
+        for destination_node in genome.nodes.values():
+            if destination_node.is_input() or source_node == destination_node:
+                continue
+            existing_connection = genome.find_connection(source_node.node_id, destination_node.node_id)
+            if existing_connection and existing_connection.is_enabled():
+                continue
+            
+            if creates_cycle_check(genome, source_node.node_id, destination_node.node_id):
+                continue
+            
+            possible_connections.append((source_node.node_id, destination_node.node_id, existing_connection))
+            
+    if not possible_connections:
+        return False
+    
+    source_id, destination_id, existing_connection = random.choice(possible_connections)
+    if existing_connection is not None:
+        existing_connection.enable()
+        genome.fitness = -math.inf
+        return True
+    
+    innovation_number = innovation_tracker.get_connection_innovation(source_id, destination_id)
+    new_connection = ConnectionGene(source_id=source_id, destination_id=destination_id, weight=random.uniform(-1, 1), enabled=True, innovation_number=innovation_number)
+    if not genome.add_connection(connection_gene=new_connection):
+        return False
+    genome.fitness = -math.inf
+    return True
 
 def mutate_add_node(genome: Genome, innovation_tracker: InnovationTracker):
     enabled_connections = []
@@ -573,7 +617,7 @@ class Population:
         selected_candidates = random.sample(candidates, k = min(tournament_size, len(candidates)))
         return max(selected_candidates, key=lambda genome: genome.fitness)
         
-    def create_next_generation(self, weight_mutation_probability:float, weight_mutation_strength:float, crossover_probability, add_node_probability, tournament_size = 3):
+    def create_next_generation(self, config, tournament_size = 3):
         if not self.genomes:
             raise ValueError("create_mext_generation, the population is empty")
         if any(genome.fitness == -math.inf for genome in self.genomes):
@@ -585,26 +629,27 @@ class Population:
         
         while len(next_generation) < self.population_size:
             parent_a = self._select_parent(tournament_size=tournament_size)
-            should_crossover = (random.random() < crossover_probability)
 
-            if should_crossover:
+            if random.random() < config.training.crossover_probability:
                 parent_b = self._select_parent(tournament_size=tournament_size, excluded_parent=parent_a)
                 child = crossover(parent_a, parent_b)
             else:
                 child = parent_a.copy_genome()
-            
 
-            mutate_weights(genome=child, mutation_probability=(weight_mutation_probability), mutation_strength=weight_mutation_strength)
+            mutate_weights(genome=child, mutation_probability=(config.training.weight_mutation_probability), mutation_strength=config.training.weight_mutation_strength)
 
-            if random.random() < add_node_probability: 
+            if random.random() < config.training.add_node_probability: 
                 mutate_add_node(genome=child, innovation_tracker=self.innovation_tracker)
+            if random.random() < config.training.add_connection_probability: 
+                mutate_add_connection(genome=child, innovation_tracker=self.innovation_tracker)
+                    
             next_generation.append(child)
 
         self.genomes = next_generation
         self.best_genome = None
         
-    def run_generations(self, evaluator, number_of_generations, weight_mutation_probability, weight_mutation_strength, crossover_probability, add_node_probability, tournament_size = 3):
-        for generation in range(number_of_generations):
+    def run_generations(self, config, evaluator, tournament_size = 3):
+        for generation in range(config.training.number_of_generations):
             self.evaluate_population(evaluator)
             best_genome = self.find_best_genome()
             avg_fitness = sum([genome.fitness for genome in self.genomes]) / self.population_size
@@ -621,8 +666,8 @@ class Population:
                 print("Environment was solved")
                 return best_genome.copy_genome(preserve_fitness=True)
             
-            if generation < number_of_generations - 1:
-                self.create_next_generation(weight_mutation_probability, weight_mutation_strength, crossover_probability, add_node_probability, tournament_size)
+            if generation < config.training.number_of_generations - 1:
+                self.create_next_generation(config, tournament_size)
         
         return self.find_best_genome().copy_genome(preserve_fitness=True)
 
@@ -636,6 +681,7 @@ def main() -> None:
     population.initialize_population(input_count=gym_wrapper.input_count, output_count=gym_wrapper.output_count)
 
     winner = population.run_generations(
+        config=config,
         evaluator=evaluator,
         number_of_generations=200,
         weight_mutation_probability=0.2,
