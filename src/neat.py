@@ -440,7 +440,7 @@ def crossover(parent_a: Genome, parent_b: Genome, disabled_inheritance_probabili
         if not child.add_node(inherited_node.copy_node()):
             raise RuntimeError(f"Failed to add node {node_id} during crossover")
 
-    for innovation, fitter_connection in (fitter_parent.connections.items()):
+    for innovation, fitter_connection in fitter_parent.connections.items():
         weaker_connection = weaker_parent.connections.get(innovation)
 
         if weaker_connection is None:
@@ -461,6 +461,10 @@ def crossover(parent_a: Genome, parent_b: Genome, disabled_inheritance_probabili
                     inherited_connection.disable()
                 else:
                     inherited_connection.enable()
+
+        if inherited_connection.is_enabled():
+            if creates_cycle_check(child, inherited_connection.source_id, inherited_connection.destination_id):
+                inherited_connection.disable()
 
         if not child.add_connection(inherited_connection):
             raise RuntimeError(
@@ -683,11 +687,6 @@ def main() -> None:
     winner = population.run_generations(
         config=config,
         evaluator=evaluator,
-        number_of_generations=200,
-        weight_mutation_probability=0.2,
-        weight_mutation_strength=0.2,
-        crossover_probability=0.75,
-        add_node_probability=0.03,
         tournament_size=3,
     )
 
