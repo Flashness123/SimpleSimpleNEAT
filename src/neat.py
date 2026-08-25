@@ -1,4 +1,7 @@
 # TODO: Instead of a node_value dict wouldnt it be better to give a new attrivute to nodes?
+#       Should the weight differences just be added up and averaged? Not like a MSE?
+#       Design idea - smart comments multiline adjusting position to code and text length
+
 from __future__ import annotations
 import math
 from collections.abc import Sequence
@@ -474,7 +477,29 @@ def crossover(parent_a: Genome, parent_b: Genome, disabled_inheritance_probabili
 
     child.fitness = -math.inf
     return child
-        
+
+def measure_compatibility_dist(config, genome1: Genome, genome2: Genome) -> float:
+    innovations1 = set(genome1.connections.keys()) # the innovation numbers of this genome
+    innovations2 = set(genome2.connections.keys())
+
+    matching = innovations1 & innovations2
+    weight_diff = 0.0
+    for innovation in matching:
+        weight_diff += abs(genome1.connections[innovation].weight - genome2.connections[innovation].weight)
+        print(f"Weight diff: {weight_diff}")
+
+    mismatching = innovations1 ^ innovations2
+    # divide disjoint into disjoint and excess
+    highest_shared_innovation_num = min(max(innovations1) if innovations1 else 0, max(innovations2) if innovations2 else 0)
+    disjoint_cnt = excess_cnt = 0
+    for innovation in mismatching:
+        if innovation <= highest_shared_innovation_num:
+            disjoint_cnt += 1
+        else:
+            excess_cnt += 1
+
+    max_genome_size = max(len(innovations1), len(innovations2), 1)
+    return (excess_cnt * config.training.loss_weight_excess + disjoint_cnt * config.training.loss_weight_disjoint) / max_genome_size + weight_diff * config.training.loss_weight_difference
         
 
 
@@ -675,41 +700,93 @@ class Population:
         
         return self.find_best_genome().copy_genome(preserve_fitness=True)
 
+class Species:
+    def __init__(self):
+        pass
+
 def main() -> None:
     config = OmegaConf.load("src/config.yaml")
-    random.seed(config.environment.random_seed)
-    gym_wrapper = GymEnvironmentWrapper(environment_name=config.environment.name)
-    evaluator = EnvironmentEvaluator(config, gym_wrapper)
+    # random.seed(config.environment.random_seed)
+    # gym_wrapper = GymEnvironmentWrapper(environment_name=config.environment.name)
+    # evaluator = EnvironmentEvaluator(config, gym_wrapper)
 
-    population = Population(config)
-    population.initialize_population(input_count=gym_wrapper.input_count, output_count=gym_wrapper.output_count)
+    # population = Population(config)
+    # population.initialize_population(input_count=gym_wrapper.input_count, output_count=gym_wrapper.output_count)
 
-    winner = population.run_generations(
-        config=config,
-        evaluator=evaluator,
-        tournament_size=3,
-    )
-
-    # print("\nWinning fitness:", winner.fitness)
-    # print("Winning nodes:", len(winner.nodes))
-    # print(
-    #     "Winning connections:",
-    #     len(winner.connections),
+    # winner = population.run_generations(
+    #     config=config,
+    #     evaluator=evaluator,
+    #     tournament_size=3,
     # )
 
-    # print("\nWinning connection genes:")
+    ################################################################################################################
+    genome_a = Genome()
+    genome_b = Genome()
 
-    # for innovation in sorted(winner.connections):
-    #     connection = winner.connections[innovation]
+    # Same nodes in both genomes
+    for node_id in range(3):
+        genome_a.add_node(NodeGene(node_id, "input", 0.0))
+        genome_b.add_node(NodeGene(node_id, "input", 0.0))
 
-    #     print(
-    #         f"Innovation {innovation}: "
-    #         f"{connection.source_id} → "
-    #         f"{connection.destination_id}, "
-    #         f"weight={connection.weight:.4f}, "
-    #         f"enabled={connection.enabled}"
-    #     )
+    genome_a.add_node(NodeGene(3, "output", 0.0))
+    genome_b.add_node(NodeGene(3, "output", 0.0))
 
+    # Matching genes: innovations 0 and 1
+    genome_a.add_connection(
+        ConnectionGene(
+            source_id=0,
+            destination_id=3,
+            weight=0.5,
+            enabled=True,
+            innovation_number=0,
+        )
+    )
+
+    genome_b.add_connection(
+        ConnectionGene(
+            source_id=0,
+            destination_id=3,
+            weight=0.8,
+            enabled=True,
+            innovation_number=0,
+        )
+    )
+
+    genome_a.add_connection(
+        ConnectionGene(
+            source_id=1,
+            destination_id=3,
+            weight=-0.2,
+            enabled=True,
+            innovation_number=1,
+        )
+    )
+
+    genome_b.add_connection(
+        ConnectionGene(
+            source_id=1,
+            destination_id=3,
+            weight=0.1,
+            enabled=True,
+            innovation_number=1,
+        )
+    )
+
+    # Only genome A has innovation 2
+    genome_a.add_connection(
+        ConnectionGene(
+            source_id=2,
+            destination_id=3,
+            weight=0.7,
+            enabled=True,
+            innovation_number=2,
+        )
+    )
+
+    # Only genome B has innovation 3
+    genome_b.add_connection(ConnectionGene(source_id=2,destination_id=3,weight=-0.4,enabled=True,innovation_number=3,))
+    distance = measure_compatibility_dist(config, genome_a, genome_b)
+    print("Compatibility distance:", distance)
 
 if __name__ == "__main__":
     main()

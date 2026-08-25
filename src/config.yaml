@@ -7,8 +7,12 @@ environment:
 
 training:
     number_of_generations: 200
-    crossover_probability: 0.8
-    add_node_probability: 0.1
-    add_connection_probability: 0.1
-    weight_mutation_probability: 0.4
-    weight_mutation_strength: 0.2
+    crossover_probability: 0.95
+    add_node_probability: 0.3
+    add_connection_probability: 0.3
+    weight_mutation_probability: 0.9
+    weight_mutation_strength: 0.35
+
+    loss_weight_excess: 1.0
+    loss_weight_disjoint: 1.0
+    loss_weight_difference: 0.4
