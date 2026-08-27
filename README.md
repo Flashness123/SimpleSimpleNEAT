@@ -39,7 +39,3 @@ it runs a little compatibility-distance demo instead. The `record_demo.py` scrip
 the one I used to actually train on MountainCar and save the gif above, so look there
 if you want to see a full training run.
 
-## Still todo
-
-Speciation isn't done yet. Right now selection is just tournament selection over the
-whole population, so that's the next thing I want to add.
