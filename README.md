@@ -1,38 +1,45 @@
 # SimpleSimpleNEAT
 
-A from-scratch implementation of **NEAT** (NeuroEvolution of Augmenting
-Topologies) — evolving neural networks to solve Gymnasium control tasks, no
-neuroevolution library involved.
+This is my own implementation of NEAT (NeuroEvolution of Augmenting Topologies),
+written from scratch without any neuroevolution library. I mostly built it to
+actually understand how NEAT works instead of just reading about it.
 
-<!-- TODO: drop in the training GIF here once recorded -->
-<!-- ![NEAT solving Acrobot](assets/demo.gif) -->
-*(demo GIF coming soon — a population learning to swing up Acrobot)*
+![NEAT solving MountainCar](assets/demo.gif)
 
-## Why I built this
+The gif is a network evolved with this code solving MountainCar-v0. It reaches the
+flag in about 122 steps.
 
-Part of my reinforcement learning journey. I love evolutionary algorithms — the
-idea that selection, mutation and crossover alone can produce competent behaviour,
-no gradients required — and what I enjoy most is combining that with neural
-networks: letting evolution grow both the weights *and* the shape of the network
-instead of fixing the architecture up front. NEAT is the classic version of that
-idea, so I wanted to build it myself rather than import it.
+## Why I made this
+
+I'm really into reinforcement learning, and I think evolutionary algorithms are
+super cool. The idea that just selection, mutation and crossover can produce
+something that actually works still kind of amazes me, and with NEAT you don't only
+evolve the weights of the network but its structure too, which I find fascinating.
+So instead of using a library I wanted to write it myself and see if I could get it
+to work.
 
 ## What it does
 
-Starts from a population of minimal networks and evolves them over generations —
-mutating weights, adding nodes and connections, and recombining the best
-performers — until they get good at the task. Everything (environment, population
-size, mutation rates, generations) is set in `src/config.yaml`. Defaults to
-`Acrobot-v1`.
+It starts with a population of tiny networks and evolves them over many generations,
+mutating the weights, adding new nodes and connections, and combining the best ones,
+until they get good at the task. You set the environment, population size, mutation
+rates and so on in `src/config.yaml`.
 
-Speciation is the next piece I want to finish; right now selection is plain
-tournament selection over the whole population.
+## How to run it
 
-## Running it
-
-Managed with [uv](https://github.com/astral-sh/uv):
+I use [uv](https://github.com/astral-sh/uv):
 
 ```bash
 uv sync
-uv run python src/neat.py      # run from the repo root
+uv run python src/neat.py
 ```
+
+Small heads up: at the moment the training loop inside `main()` is commented out and
+it runs a little compatibility-distance demo instead. The `record_demo.py` script is
+the one I used to actually train on MountainCar and save the gif above, so look there
+if you want to see a full training run.
+
+## Still todo
+
+Speciation isn't done yet. Right now selection is just tournament selection over the
+whole population, so that's the next thing I want to add.

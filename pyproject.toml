@@ -9,6 +9,7 @@ dependencies = [
     "imageio>=2.37.4",
     "mujoco>=3.10.0",
     "numpy>=2.5.1",
+    "omegaconf>=2.3.1",
     "packaging>=26.2",
     "pygame>=2.6.1",
     "torch>=2.13.0",
